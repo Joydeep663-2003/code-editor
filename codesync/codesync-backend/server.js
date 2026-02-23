@@ -9,7 +9,10 @@ require("dotenv").config();
 
 const app = express();
 const server = http.createServer(app);
-app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:3000", credentials: true }));
+app.use(cors({
+  origin: "https://code-editor-seven-tawny.vercel.app",
+  credentials: true
+}));
 app.use(express.json());
 
 mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/codesync")
@@ -129,7 +132,11 @@ app.get("/", (req, res) => {
 app.get("/api/health", (_, res) => res.json({ status: "ok" }));
 
 const io = new Server(server, {
-  cors: { origin: process.env.CLIENT_URL || "http://localhost:3000", methods: ["GET","POST"], credentials: true }
+  cors: {
+    origin: "https://code-editor-seven-tawny.vercel.app",
+    methods: ["GET", "POST"],
+    credentials: true
+  }
 });
 
 io.use((socket, next) => {
