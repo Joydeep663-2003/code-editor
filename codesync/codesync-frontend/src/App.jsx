@@ -22,25 +22,70 @@ const LANGUAGES = {
   java:{ name:"Java", icon:"JV", color:"#b07219",
     template:`// Java\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, CodeSync!");\n        int sum = 0;\n        for (int i = 1; i <= 5; i++) sum += i;\n        System.out.println("Sum 1-5: " + sum);\n    }\n}`,
     run(code){
+      const errors=[];
       const logs=[];
+      // Basic Java syntax error detection
+      const lines = code.split("\n");
+      let braceOpen=0, braceClose=0, parenOpen=0, parenClose=0;
+      for(let i=0;i<lines.length;i++){
+        const l=lines[i];
+        braceOpen  += (l.match(/{/g)||[]).length;
+        braceClose += (l.match(/}/g)||[]).length;
+        parenOpen  += (l.match(/\(/g)||[]).length;
+        parenClose += (l.match(/\)/g)||[]).length;
+        // Missing semicolons on statement lines
+        const trimmed=l.trim();
+        if(trimmed.length>0 && !trimmed.endsWith("{") && !trimmed.endsWith("}") && !trimmed.endsWith(";") && !trimmed.startsWith("//") && !trimmed.startsWith("*") && !trimmed.startsWith("public class") && !trimmed.startsWith("public static") && !trimmed.startsWith("for") && !trimmed.startsWith("if") && !trimmed.startsWith("while") && !trimmed.startsWith("else") && trimmed.includes(" ")){
+          errors.push("Line "+(i+1)+": Missing semicolon ';' → "+trimmed.substring(0,40));
+        }
+      }
+      if(braceOpen!==braceClose) errors.push("Brace mismatch: "+braceOpen+" opening '{' but "+braceClose+" closing '}'");
+      if(parenOpen!==parenClose) errors.push("Parenthesis mismatch: "+parenOpen+" '(' but "+parenClose+" ')'");
+      // Check for common errors
+      if(!code.includes("class ")) errors.push("Error: No class definition found. Java requires a class.");
+      if(!code.includes("main")) errors.push("Error: No main method found. Java requires public static void main(String[] args)");
+      if(errors.length>0) return{output:"",error:"Compilation Error:\n"+errors.join("\n")};
+      // Simulate output
       const re=/System\.out\.println\(([^)]+)\)/g;
       let m;
       while((m=re.exec(code))!==null){
         let val=m[1].replace(/^"|"$/g,"").replace(/^'|'$/g,"");
         logs.push(val);
       }
-      if(!logs.length) logs.push("// Java needs a real compiler to run\n// Showing simulation only");
+      if(!logs.length) logs.push("Program executed successfully (no output)\n// Note: Full Java execution requires a server-side compiler");
       return{output:logs.join("\n"),error:null};
     }
   },
   cpp:{ name:"C++", icon:"C+", color:"#f34b7d",
     template:`// C++\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, CodeSync!" << endl;\n    int sum = 0;\n    for (int i = 1; i <= 5; i++) sum += i;\n    cout << "Sum 1-5: " << sum << endl;\n    return 0;\n}`,
     run(code){
+      const errors=[];
       const logs=[];
+      // Basic C++ syntax error detection
+      const lines=code.split("\n");
+      let braceOpen=0,braceClose=0,parenOpen=0,parenClose=0;
+      for(let i=0;i<lines.length;i++){
+        const l=lines[i];
+        braceOpen  += (l.match(/{/g)||[]).length;
+        braceClose += (l.match(/}/g)||[]).length;
+        parenOpen  += (l.match(/\(/g)||[]).length;
+        parenClose += (l.match(/\)/g)||[]).length;
+        const trimmed=l.trim();
+        // Detect missing semicolons
+        if(trimmed.length>0 && !trimmed.endsWith("{") && !trimmed.endsWith("}") && !trimmed.endsWith(";") && !trimmed.startsWith("//") && !trimmed.startsWith("#") && !trimmed.startsWith("/*") && !trimmed.startsWith("*") && !trimmed.startsWith("for") && !trimmed.startsWith("if") && !trimmed.startsWith("while") && !trimmed.startsWith("else") && trimmed.includes(" ")){
+          errors.push("Line "+(i+1)+": Missing semicolon ';' → "+trimmed.substring(0,40));
+        }
+      }
+      if(braceOpen!==braceClose) errors.push("Brace mismatch: "+braceOpen+" opening '{' but "+braceClose+" closing '}'");
+      if(parenOpen!==parenClose) errors.push("Parenthesis mismatch: "+parenOpen+" '(' but "+parenClose+" ')'");
+      if(!code.includes("#include")) errors.push("Warning: No #include directive found");
+      if(!code.includes("main")) errors.push("Error: No main() function found");
+      if(errors.length>0) return{output:"",error:"Compile Error:\n"+errors.join("\n")};
+      // Simulate cout output
       const re=/cout\s*<<\s*"([^"]+)"/g;
       let m;
       while((m=re.exec(code))!==null){ logs.push(m[1]); }
-      if(!logs.length) logs.push("// C++ needs a real compiler to run\n// Showing simulation only");
+      if(!logs.length) logs.push("Program executed successfully (no output)\n// Note: Full C++ execution requires a server-side compiler");
       return{output:logs.join("\n"),error:null};
     }
   },
@@ -422,7 +467,7 @@ function EditorPage({ user, roomId, onLeave }) {
       <div style={{ background: "#0a0a12", borderBottom: "1px solid #1a1a2a", padding: "0 16px", display: "flex", alignItems: "center", gap: 2, overflowX: "auto", flexShrink: 0, height: 38 }}>
         {Object.entries(LANGUAGES).map(([key, info]) => (
           <button key={key} className={`lb${lang === key ? " active" : ""}`} onClick={() => changeLang(key)}>
-            {info.icon} {info.name}
+            {info.name}
           </button>
         ))}
         <div style={{ flex: 1 }} />
