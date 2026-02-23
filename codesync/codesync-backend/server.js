@@ -122,6 +122,9 @@ app.delete("/api/rooms/:roomId", auth, async (req, res) => {
   await room.deleteOne();
   res.json({ deleted: true });
 });
+app.get("/", (req, res) => {
+  res.send("🚀 CodeSync Backend is Running");
+});
 
 app.get("/api/health", (_, res) => res.json({ status: "ok" }));
 
