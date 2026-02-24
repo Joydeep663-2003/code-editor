@@ -1,7 +1,3 @@
-// ===============================
-// CodeSync Backend - server.js
-// ===============================
-
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -13,7 +9,6 @@ require("dotenv").config();
 
 const app = express();
 const server = http.createServer(app);
-
 const PORT = process.env.PORT || 5000;
 
 /* =========================
@@ -31,21 +26,10 @@ const JWT_SECRET = process.env.JWT_SECRET;
    CORS (PRODUCTION SAFE)
 ========================= */
 
-const allowedOrigins = [
-  "http://localhost:3000",
-  process.env.CLIENT_URL,
-];
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error("Not allowed by CORS"));
-    },
-    credentials: true,
-  })
-);
+app.use(cors({
+  origin: true, // allow all origins (safe for Vercel + Render)
+  credentials: true
+}));
 
 app.options("*", cors());
 app.use(express.json());
@@ -54,10 +38,9 @@ app.use(express.json());
    DATABASE
 ========================= */
 
-mongoose
-  .connect(process.env.MONGODB_URI)
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.error("❌ MongoDB error:", err.message));
+  .catch(err => console.error("❌ MongoDB error:", err.message));
 
 /* =========================
    MODELS
@@ -67,7 +50,7 @@ const UserSchema = new mongoose.Schema({
   username: { type: String, unique: true, lowercase: true, trim: true },
   email: { type: String, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
-  color: { type: String, default: "#6c63ff" },
+  color: { type: String, default: "#6c63ff" }
 });
 
 UserSchema.pre("save", async function () {
@@ -80,8 +63,9 @@ const User = mongoose.model("User", UserSchema);
 
 const RoomSchema = new mongoose.Schema({
   roomId: { type: String, unique: true },
+  name: { type: String, default: "" },
   code: { type: Object, default: {} },
-  updatedAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
 });
 
 const Room = mongoose.model("Room", RoomSchema);
@@ -105,6 +89,22 @@ app.get("/api/health", (_, res) => {
   res.json({ status: "ok" });
 });
 
+/* ---------- GET CURRENT USER ---------- */
+
+app.get("/api/me", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ error: "No token" });
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(decoded.id).select("-password");
+
+    res.json({ user });
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
+});
+
 /* ---------- AUTH ---------- */
 
 app.post("/api/auth/register", async (req, res) => {
@@ -119,6 +119,7 @@ app.post("/api/auth/register", async (req, res) => {
     const token = signToken({ id: user._id });
 
     res.status(201).json({ token, user });
+
   } catch (err) {
     if (err.code === 11000)
       return res.status(409).json({ error: "User already exists" });
@@ -134,9 +135,7 @@ app.post("/api/auth/login", async (req, res) => {
     if (!username || !password)
       return res.status(400).json({ error: "Fields required" });
 
-    const user = await User.findOne({
-      username: username.toLowerCase(),
-    });
+    const user = await User.findOne({ username: username.toLowerCase() });
 
     if (!user || !(await bcrypt.compare(password, user.password)))
       return res.status(401).json({ error: "Invalid credentials" });
@@ -144,6 +143,7 @@ app.post("/api/auth/login", async (req, res) => {
     const token = signToken({ id: user._id });
 
     res.json({ token, user });
+
   } catch {
     res.status(500).json({ error: "Server error" });
   }
@@ -157,22 +157,14 @@ app.get("/api/rooms", async (_, res) => {
 });
 
 app.post("/api/rooms", async (_, res) => {
-  const roomId = Math.random()
-    .toString(36)
-    .substring(2, 8)
-    .toUpperCase();
-
+  const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
   const room = await Room.create({ roomId });
-
   res.status(201).json({ room });
 });
 
 app.get("/api/rooms/:roomId", async (req, res) => {
   const room = await Room.findOne({ roomId: req.params.roomId });
-
-  if (!room)
-    return res.status(404).json({ error: "Room not found" });
-
+  if (!room) return res.status(404).json({ error: "Room not found" });
   res.json({ room });
 });
 
@@ -180,13 +172,10 @@ app.post("/api/rooms/:roomId/code", async (req, res) => {
   const { lang, code } = req.body;
 
   const room = await Room.findOne({ roomId: req.params.roomId });
-
-  if (!room)
-    return res.status(404).json({ error: "Room not found" });
+  if (!room) return res.status(404).json({ error: "Room not found" });
 
   room.code[lang] = code;
   room.updatedAt = new Date();
-
   await room.save();
 
   res.json({ success: true });
@@ -199,8 +188,8 @@ app.post("/api/rooms/:roomId/code", async (req, res) => {
 const io = new Server(server, {
   cors: {
     origin: true,
-    credentials: true,
-  },
+    credentials: true
+  }
 });
 
 io.on("connection", (socket) => {
@@ -210,12 +199,8 @@ io.on("connection", (socket) => {
     socket.join(roomId);
   });
 
-  socket.on("code_change", ({ roomId, code, lang }) => {
-    socket.to(roomId).emit("code_change", { code, lang });
-  });
-
-  socket.on("lang_change", ({ roomId, lang }) => {
-    socket.to(roomId).emit("lang_change", { lang });
+  socket.on("code_change", ({ roomId, code }) => {
+    socket.to(roomId).emit("code_change", { code });
   });
 
   socket.on("disconnect", () => {
@@ -229,4 +214,4 @@ io.on("connection", (socket) => {
 
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-});
+}); 

@@ -6,11 +6,13 @@ const BACKEND =
 let socket = null;
 
 export function initSocket(token) {
-  if (socket) socket.disconnect();
+  if (socket) {
+    socket.disconnect();
+  }
 
   socket = io(BACKEND, {
     auth: { token },
-    transports: ["websocket"], // production best practice
+    transports: ["websocket", "polling"], // allow fallback
     withCredentials: true,
     reconnection: true,
     reconnectionAttempts: 10,
@@ -28,6 +30,10 @@ export function disconnectSocket() {
 
 export const EVENTS = {
   JOIN: "join",
+  JOINED: "joined",
+  USER_LEFT: "user_left",
   CODE_CHANGE: "code_change",
   LANG_CHANGE: "lang_change",
+  ROOM_USERS: "room_users",
+  ERROR: "error",
 };
