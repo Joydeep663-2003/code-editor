@@ -380,18 +380,22 @@ function EditorPage({ user, roomId, onLeave }) {
   };
 
   const changeLang = (newLang) => {
-    saveCode(lang, codeRef.current);
-    // Fetch saved code for new lang from server via socket
-    socketRef.current?.emit(EVENTS.LANG_CHANGE, { roomId, lang: newLang });
-    setLang(newLang);
-    // Load template until server responds
-    api.getRoom(roomId).then(({ room }) => {
-      const saved = room.code?.[newLang];
-      const newCode = saved || LANGUAGES[newLang].template;
-      setCode(newCode); codeRef.current = newCode;
-    }).catch(() => { const t = LANGUAGES[newLang].template; setCode(t); codeRef.current = t; });
-    setOutput(null);
-  };
+  saveCode(lang, codeRef.current);
+
+  setLang(newLang);
+
+  const template = LANGUAGES[newLang].template;
+
+  setCode(template);
+  codeRef.current = template;
+
+  setOutput(null);
+
+  socketRef.current?.emit(EVENTS.LANG_CHANGE, {
+    roomId,
+    lang: newLang,
+  });
+};
 
   const runCode = () => {
     setRunning(true);

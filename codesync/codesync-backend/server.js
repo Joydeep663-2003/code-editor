@@ -1,3 +1,7 @@
+// ===============================
+// CodeSync Backend - server.js
+// ===============================
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -28,36 +32,32 @@ const JWT_SECRET = process.env.JWT_SECRET;
 ========================= */
 
 const allowedOrigins = [
-  "http://localhost:3000"
+  "http://localhost:3000",
+  process.env.CLIENT_URL,
 ];
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-
-    if (
-      allowedOrigins.includes(origin) ||
-      origin.includes("vercel.app")
-    ) {
-      return callback(null, true);
-    }
-
-    return callback(new Error("Not allowed by CORS"));
-  },
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  })
+);
 
 app.options("*", cors());
-
 app.use(express.json());
 
 /* =========================
    DATABASE
 ========================= */
 
-mongoose.connect(process.env.MONGODB_URI)
+mongoose
+  .connect(process.env.MONGODB_URI)
   .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.error("❌ MongoDB error:", err.message));
+  .catch((err) => console.error("❌ MongoDB error:", err.message));
 
 /* =========================
    MODELS
@@ -67,7 +67,7 @@ const UserSchema = new mongoose.Schema({
   username: { type: String, unique: true, lowercase: true, trim: true },
   email: { type: String, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
-  color: { type: String, default: "#6c63ff" }
+  color: { type: String, default: "#6c63ff" },
 });
 
 UserSchema.pre("save", async function () {
@@ -80,9 +80,8 @@ const User = mongoose.model("User", UserSchema);
 
 const RoomSchema = new mongoose.Schema({
   roomId: { type: String, unique: true },
-  name: { type: String, default: "" },
   code: { type: Object, default: {} },
-  updatedAt: { type: Date, default: Date.now }
+  updatedAt: { type: Date, default: Date.now },
 });
 
 const Room = mongoose.model("Room", RoomSchema);
@@ -117,15 +116,9 @@ app.post("/api/auth/register", async (req, res) => {
 
     const user = await User.create({ username, email, password });
 
-    const token = signToken({
-      id: user._id,
-      username: user.username,
-      email: user.email,
-      color: user.color
-    });
+    const token = signToken({ id: user._id });
 
     res.status(201).json({ token, user });
-
   } catch (err) {
     if (err.code === 11000)
       return res.status(409).json({ error: "User already exists" });
@@ -141,20 +134,16 @@ app.post("/api/auth/login", async (req, res) => {
     if (!username || !password)
       return res.status(400).json({ error: "Fields required" });
 
-    const user = await User.findOne({ username: username.toLowerCase() });
+    const user = await User.findOne({
+      username: username.toLowerCase(),
+    });
 
     if (!user || !(await bcrypt.compare(password, user.password)))
       return res.status(401).json({ error: "Invalid credentials" });
 
-    const token = signToken({
-      id: user._id,
-      username: user.username,
-      email: user.email,
-      color: user.color
-    });
+    const token = signToken({ id: user._id });
 
     res.json({ token, user });
-
   } catch {
     res.status(500).json({ error: "Server error" });
   }
@@ -163,31 +152,44 @@ app.post("/api/auth/login", async (req, res) => {
 /* ---------- ROOMS ---------- */
 
 app.get("/api/rooms", async (_, res) => {
-  try {
-    const rooms = await Room.find().sort({ updatedAt: -1 });
-    res.json({ rooms });
-  } catch {
-    res.status(500).json({ error: "Failed to fetch rooms" });
-  }
+  const rooms = await Room.find().sort({ updatedAt: -1 });
+  res.json({ rooms });
 });
 
 app.post("/api/rooms", async (_, res) => {
-  try {
-    const roomId = Math.random()
-      .toString(36)
-      .substring(2, 8)
-      .toUpperCase();
+  const roomId = Math.random()
+    .toString(36)
+    .substring(2, 8)
+    .toUpperCase();
 
-    const room = await Room.create({
-      roomId,
-      name: `Room ${roomId}`
-    });
+  const room = await Room.create({ roomId });
 
-    res.status(201).json({ room });
+  res.status(201).json({ room });
+});
 
-  } catch {
-    res.status(500).json({ error: "Failed to create room" });
-  }
+app.get("/api/rooms/:roomId", async (req, res) => {
+  const room = await Room.findOne({ roomId: req.params.roomId });
+
+  if (!room)
+    return res.status(404).json({ error: "Room not found" });
+
+  res.json({ room });
+});
+
+app.post("/api/rooms/:roomId/code", async (req, res) => {
+  const { lang, code } = req.body;
+
+  const room = await Room.findOne({ roomId: req.params.roomId });
+
+  if (!room)
+    return res.status(404).json({ error: "Room not found" });
+
+  room.code[lang] = code;
+  room.updatedAt = new Date();
+
+  await room.save();
+
+  res.json({ success: true });
 });
 
 /* =========================
@@ -196,21 +198,25 @@ app.post("/api/rooms", async (_, res) => {
 
 const io = new Server(server, {
   cors: {
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-
-      if (origin.includes("vercel.app") || origin === "http://localhost:3000") {
-        return callback(null, true);
-      }
-
-      return callback(new Error("Not allowed by CORS"));
-    },
-    credentials: true
-  }
+    origin: true,
+    credentials: true,
+  },
 });
 
 io.on("connection", (socket) => {
   console.log("🟢 Connected:", socket.id);
+
+  socket.on("join", ({ roomId }) => {
+    socket.join(roomId);
+  });
+
+  socket.on("code_change", ({ roomId, code, lang }) => {
+    socket.to(roomId).emit("code_change", { code, lang });
+  });
+
+  socket.on("lang_change", ({ roomId, lang }) => {
+    socket.to(roomId).emit("lang_change", { lang });
+  });
 
   socket.on("disconnect", () => {
     console.log("🔴 Disconnected:", socket.id);

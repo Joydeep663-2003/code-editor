@@ -22,7 +22,7 @@ async function request(method, path, body) {
   let data = {};
   try {
     data = await res.json();
-  } catch (e) {}
+  } catch {}
 
   if (!res.ok) {
     throw new Error(data.error || "Request failed");
@@ -32,9 +32,7 @@ async function request(method, path, body) {
 }
 
 export const api = {
-  // =========================
-  // AUTH
-  // =========================
+  /* ================= AUTH ================= */
 
   register: (username, email, password) =>
     request("POST", "/api/auth/register", {
@@ -49,11 +47,10 @@ export const api = {
       password,
     }),
 
-  me: () => request("GET", "/api/health"),
+  me: () =>
+    request("GET", "/api/me"),
 
-  // =========================
-  // ROOMS
-  // =========================
+  /* ================= ROOMS ================= */
 
   listRooms: () =>
     request("GET", "/api/rooms"),
@@ -61,9 +58,16 @@ export const api = {
   createRoom: () =>
     request("POST", "/api/rooms"),
 
-  // =========================
-  // OPTIONAL (if you use later)
-  // =========================
+  getRoom: (roomId) =>
+    request("GET", `/api/rooms/${roomId}`),
+
+  saveCode: (roomId, lang, code) =>
+    request("POST", `/api/rooms/${roomId}/code`, {
+      lang,
+      code,
+    }),
+
+  /* ================= HEALTH ================= */
 
   health: () =>
     request("GET", "/api/health"),
