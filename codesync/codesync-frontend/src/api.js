@@ -32,6 +32,10 @@ async function request(method, path, body) {
 }
 
 export const api = {
+  // =========================
+  // AUTH
+  // =========================
+
   register: (username, email, password) =>
     request("POST", "/api/auth/register", {
       username,
@@ -45,5 +49,22 @@ export const api = {
       password,
     }),
 
-  health: () => request("GET", "/api/health"),
+  me: () => request("GET", "/api/health"),
+
+  // =========================
+  // ROOMS
+  // =========================
+
+  listRooms: () =>
+    request("GET", "/api/rooms"),
+
+  createRoom: () =>
+    request("POST", "/api/rooms"),
+
+  // =========================
+  // OPTIONAL (if you use later)
+  // =========================
+
+  health: () =>
+    request("GET", "/api/health"),
 };
