@@ -9,13 +9,14 @@ require("dotenv").config();
 
 const app = express();
 const server = http.createServer(app);
+
 const PORT = process.env.PORT || 5000;
 
 /* =========================
    ENV CHECK
 ========================= */
 
-if (!process.env.JWT_SECRET || !process.env.MONGODB_URI || !process.env.CLIENT_URL) {
+if (!process.env.JWT_SECRET || !process.env.MONGODB_URI) {
   console.error("❌ Missing environment variables");
   process.exit(1);
 }
@@ -23,13 +24,30 @@ if (!process.env.JWT_SECRET || !process.env.MONGODB_URI || !process.env.CLIENT_U
 const JWT_SECRET = process.env.JWT_SECRET;
 
 /* =========================
-   MIDDLEWARE
+   CORS (PRODUCTION SAFE)
 ========================= */
 
+const allowedOrigins = [
+  "http://localhost:3000"
+];
+
 app.use(cors({
-  origin: process.env.CLIENT_URL,
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+
+    if (
+      allowedOrigins.includes(origin) ||
+      origin.includes("vercel.app")
+    ) {
+      return callback(null, true);
+    }
+
+    return callback(new Error("Not allowed by CORS"));
+  },
   credentials: true
 }));
+
+app.options("*", cors());
 
 app.use(express.json());
 
@@ -45,7 +63,6 @@ mongoose.connect(process.env.MONGODB_URI)
    MODELS
 ========================= */
 
-// User
 const UserSchema = new mongoose.Schema({
   username: { type: String, unique: true, lowercase: true, trim: true },
   email: { type: String, unique: true, lowercase: true, trim: true },
@@ -61,7 +78,6 @@ UserSchema.pre("save", async function () {
 
 const User = mongoose.model("User", UserSchema);
 
-// Room
 const RoomSchema = new mongoose.Schema({
   roomId: { type: String, unique: true },
   name: { type: String, default: "" },
@@ -95,6 +111,7 @@ app.get("/api/health", (_, res) => {
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { username, email, password } = req.body;
+
     if (!username || !email || !password)
       return res.status(400).json({ error: "All fields required" });
 
@@ -120,6 +137,7 @@ app.post("/api/auth/register", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { username, password } = req.body;
+
     if (!username || !password)
       return res.status(400).json({ error: "Fields required" });
 
@@ -144,7 +162,6 @@ app.post("/api/auth/login", async (req, res) => {
 
 /* ---------- ROOMS ---------- */
 
-// Get all rooms
 app.get("/api/rooms", async (_, res) => {
   try {
     const rooms = await Room.find().sort({ updatedAt: -1 });
@@ -154,7 +171,6 @@ app.get("/api/rooms", async (_, res) => {
   }
 });
 
-// Create room
 app.post("/api/rooms", async (_, res) => {
   try {
     const roomId = Math.random()
@@ -180,7 +196,15 @@ app.post("/api/rooms", async (_, res) => {
 
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL,
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+
+      if (origin.includes("vercel.app") || origin === "http://localhost:3000") {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
     credentials: true
   }
 });
