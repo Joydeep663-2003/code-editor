@@ -27,7 +27,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 ========================= */
 
 app.use(cors({
-  origin: true, // allow all origins (safe for Vercel + Render)
+  origin: true,
   credentials: true
 }));
 
@@ -48,11 +48,12 @@ mongoose.connect(process.env.MONGODB_URI)
 
 const UserSchema = new mongoose.Schema({
   username: { type: String, unique: true, lowercase: true, trim: true },
-  email: { type: String, unique: true, lowercase: true, trim: true },
+  email:    { type: String, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
-  color: { type: String, default: "#6c63ff" }
+  color:    { type: String, default: "#6c63ff" }
 });
 
+// Hash password before saving
 UserSchema.pre("save", async function () {
   if (this.isModified("password")) {
     this.password = await bcrypt.hash(this.password, 10);
@@ -62,20 +63,29 @@ UserSchema.pre("save", async function () {
 const User = mongoose.model("User", UserSchema);
 
 const RoomSchema = new mongoose.Schema({
-  roomId: { type: String, unique: true },
-  name: { type: String, default: "" },
-  code: { type: Object, default: {} },
+  roomId:    { type: String, unique: true },
+  name:      { type: String, default: "" },
+  code:      { type: Object, default: {} },
   updatedAt: { type: Date, default: Date.now }
 });
 
 const Room = mongoose.model("Room", RoomSchema);
 
 /* =========================
-   JWT
+   HELPERS
 ========================= */
 
 const signToken = (payload) =>
   jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+
+// Returns a plain safe user object (no password)
+const safeUser = (user) => ({
+  _id:      user._id,
+  id:       user._id,
+  username: user.username,
+  email:    user.email,
+  color:    user.color,
+});
 
 /* =========================
    ROUTES
@@ -98,14 +108,15 @@ app.get("/api/me", async (req, res) => {
 
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = await User.findById(decoded.id).select("-password");
+    if (!user) return res.status(401).json({ error: "User not found" });
 
-    res.json({ user });
+    res.json({ user: safeUser(user) });
   } catch {
     res.status(401).json({ error: "Invalid token" });
   }
 });
 
-/* ---------- AUTH ---------- */
+/* ---------- REGISTER ---------- */
 
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -114,37 +125,60 @@ app.post("/api/auth/register", async (req, res) => {
     if (!username || !email || !password)
       return res.status(400).json({ error: "All fields required" });
 
-    const user = await User.create({ username, email, password });
+    if (username.trim().length < 3)
+      return res.status(400).json({ error: "Username must be at least 3 characters" });
 
-    const token = signToken({ id: user._id });
+    if (password.length < 6)
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
 
-    res.status(201).json({ token, user });
+    // Create user — pre-save hook hashes the password
+    const user = await User.create({ username: username.trim(), email: email.trim(), password });
+
+    // Re-fetch to get the final saved document (with hashed password stored, but we strip it)
+    const savedUser = await User.findById(user._id).select("-password");
+
+    const token = signToken({ id: savedUser._id });
+
+    res.status(201).json({ token, user: safeUser(savedUser) });
 
   } catch (err) {
-    if (err.code === 11000)
-      return res.status(409).json({ error: "User already exists" });
-
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern || {})[0] || "field";
+      return res.status(409).json({ error: `That ${field} is already taken` });
+    }
+    console.error("Register error:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 });
+
+/* ---------- LOGIN ---------- */
 
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { username, password } = req.body;
 
     if (!username || !password)
-      return res.status(400).json({ error: "Fields required" });
+      return res.status(400).json({ error: "Username and password required" });
 
-    const user = await User.findOne({ username: username.toLowerCase() });
+    // Find user — must include password for comparison
+    const user = await User.findOne({ username: username.trim().toLowerCase() });
 
-    if (!user || !(await bcrypt.compare(password, user.password)))
-      return res.status(401).json({ error: "Invalid credentials" });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    const passwordMatch = await bcrypt.compare(password, user.password);
+
+    if (!passwordMatch) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
 
     const token = signToken({ id: user._id });
 
-    res.json({ token, user });
+    res.json({ token, user: safeUser(user) });
 
-  } catch {
+  } catch (err) {
+    console.error("Login error:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -214,4 +248,4 @@ io.on("connection", (socket) => {
 
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-}); 
+});

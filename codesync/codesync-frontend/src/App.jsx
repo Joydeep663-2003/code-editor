@@ -11,109 +11,290 @@ const THEMES = {
   "Solarized Dark":{ bg: "#002b36", line: "#073642", text: "#839496", keyword: "#859900", string: "#2aa198", comment: "#586e75", number: "#d33682", func: "#268bd2", accent: "#b58900", border: "#073642" },
 };
 
+// ─── Languages that support stdin input ───────────────────────────────────────
+const STDIN_LANGS = ["javascript", "typescript", "python", "java", "cpp"];
+
+// ─── Code Runners ──────────────────────────────────────────────────────────────
+function runJS(code, stdin = "") {
+  const logs = [];
+  const inputLines = stdin.split("\n").filter(Boolean);
+  let inputIdx = 0;
+  const sc = {
+    log: (...a) => logs.push(a.map(x => typeof x === "object" ? JSON.stringify(x, null, 2) : String(x)).join(" ")),
+    error: (...a) => logs.push("❌ " + a.join(" ")),
+    warn: (...a) => logs.push("⚠️ " + a.join(" ")),
+    info: (...a) => logs.push("ℹ️ " + a.join(" "))
+  };
+  // Inject a readline-like input() shim
+  const inputFn = () => {
+    const val = inputLines[inputIdx] ?? "";
+    inputIdx++;
+    return val;
+  };
+  try {
+    const fn = new Function("console", "input", code);
+    const r = fn(sc, inputFn);
+    if (r !== undefined) logs.push("→ " + String(r));
+    return { output: logs.join("\n") || "✓ Done (no output)", error: null };
+  } catch (e) {
+    return { output: "", error: e.message };
+  }
+}
+
+function runTS(code, stdin = "") {
+  const stripped = code
+    .replace(/:\s*[\w|&<>[\]]+(?=[,)\s=;{])/g, "")
+    .replace(/interface\s+\w+\s*{[^}]*}/g, "")
+    .replace(/<[\w,\s]+>/g, "")
+    .replace(/as\s+\w+/g, "");
+  return runJS(stripped, stdin);
+}
+
+function runPython(code, stdin = "") {
+  const logs = [];
+  const inputLines = stdin.split("\n").filter(Boolean);
+  let inputIdx = 0;
+  const lines = code.split("\n");
+  const vars = {};
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+
+    // input() assignment: x = input() or x = input("prompt")
+    const inputAssign = t.match(/^(\w+)\s*=\s*input\s*\(([^)]*)\)$/);
+    if (inputAssign) {
+      const varName = inputAssign[1];
+      const prompt = inputAssign[2].replace(/^["']|["']$/g, "");
+      if (prompt) logs.push(prompt);
+      vars[varName] = inputLines[inputIdx] ?? "";
+      inputIdx++;
+      continue;
+    }
+
+    // int(input()) assignment: x = int(input())
+    const intInputAssign = t.match(/^(\w+)\s*=\s*int\s*\(\s*input\s*\(([^)]*)\)\s*\)$/);
+    if (intInputAssign) {
+      const varName = intInputAssign[1];
+      const prompt = intInputAssign[2].replace(/^["']|["']$/g, "");
+      if (prompt) logs.push(prompt);
+      vars[varName] = parseInt(inputLines[inputIdx] ?? "0", 10) || 0;
+      inputIdx++;
+      continue;
+    }
+
+    // float(input()) assignment
+    const floatInputAssign = t.match(/^(\w+)\s*=\s*float\s*\(\s*input\s*\(([^)]*)\)\s*\)$/);
+    if (floatInputAssign) {
+      const varName = floatInputAssign[1];
+      const prompt = floatInputAssign[2].replace(/^["']|["']$/g, "");
+      if (prompt) logs.push(prompt);
+      vars[varName] = parseFloat(inputLines[inputIdx] ?? "0") || 0;
+      inputIdx++;
+      continue;
+    }
+
+    // print()
+    if (t.startsWith("print(")) {
+      let inner = t.slice(6, -1).trim();
+      // Replace known variables
+      for (const [k, v] of Object.entries(vars)) {
+        inner = inner.replace(new RegExp(`\\b${k}\\b`, "g"), JSON.stringify(v));
+      }
+      inner = inner.replace(/^f?"([^"]*)"/, (_, s) => s);
+      inner = inner.replace(/^f?'([^']*)'/, (_, s) => s);
+      // f-string variable interpolation (simple)
+      inner = inner.replace(/\{(\w+)\}/g, (_, k) => vars[k] !== undefined ? String(vars[k]) : k);
+      logs.push(inner);
+    }
+  }
+  return { output: logs.join("\n") || "✓ Python (browser simulation — limited)", error: null };
+}
+
+// ─── Proper C++ validator ──────────────────────────────────────────────────────
+function runCpp(code, stdin = "") {
+  const errors = [];
+  const logs = [];
+
+  // Strip comments first for analysis
+  const stripped = code
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const lines = stripped.split("\n");
+
+  // Brace / paren balance
+  let braceOpen = 0, braceClose = 0;
+  for (const ch of stripped) {
+    if (ch === "{") braceOpen++;
+    else if (ch === "}") braceClose++;
+  }
+  if (braceOpen !== braceClose) {
+    errors.push(`Brace mismatch: ${braceOpen} '{' vs ${braceClose} '}'`);
+  }
+
+  // Must have main()
+  if (!/int\s+main\s*\(/.test(stripped)) {
+    errors.push("Error: No 'int main()' function found");
+  }
+
+  // Must have at least one #include
+  if (!/#include/.test(code)) {
+    errors.push("Warning: No #include directive found");
+  }
+
+  // Check each non-empty, non-directive, non-brace line for semicolons
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const t = raw.trim();
+    if (!t) continue;
+    if (t.startsWith("#")) continue;          // preprocessor
+    if (/^[{}]$/.test(t)) continue;           // lone braces
+    if (t.endsWith("{") || t.endsWith("}")) continue;  // block openers/closers
+    if (/^(public|private|protected)\s*:/.test(t)) continue; // access specifiers
+
+    // Lines that legitimately don't end with ;
+    const noSemiNeeded = [
+      /^\s*(if|else|for|while|do|switch|try|catch|class|struct|namespace|template)\b/,
+      /^\s*else\s*$/,
+      /^\s*do\s*$/,
+      /[{};]\s*$/,   // already ends with ; or { or }
+    ];
+    if (noSemiNeeded.some(r => r.test(raw))) continue;
+
+    // If line looks like a statement (contains operators, calls, keywords)
+    // and doesn't end with ; — flag it
+    const looksLikeStatement = /[=+\-*/%!<>&|^~]|<<|>>|\w+\s*\(/.test(t);
+    if (looksLikeStatement && !t.endsWith(";") && !t.endsWith(",")) {
+      errors.push(`Line ${i + 1}: Possibly missing semicolon → ${t.substring(0, 50)}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    return { output: "", error: "Compile Error:\n" + errors.join("\n") };
+  }
+
+  // Simulate cout output
+  const coutRe = /cout\s*(?:<<\s*(?:"([^"]*)"|'([^']*)'|(\w+))\s*)+/g;
+  let m;
+  while ((m = coutRe.exec(stripped)) !== null) {
+    // collect all << tokens on this cout chain
+    const chain = m[0];
+    const tokens = [];
+    const tokRe = /<<\s*(?:"([^"]*)"|'([^']*)'|endl|\\n|(\w+))/g;
+    let t2;
+    while ((t2 = tokRe.exec(chain)) !== null) {
+      if (t2[1] !== undefined) tokens.push(t2[1]);
+      else if (t2[2] !== undefined) tokens.push(t2[2]);
+      else if (t2[3] === "endl") tokens.push("\n");
+      // variable names: skip (we don't track values)
+    }
+    const line = tokens.join("").replace(/\\n/g, "\n");
+    if (line.trim()) logs.push(line.trimEnd());
+  }
+
+  if (stdin) {
+    logs.push("\n[stdin provided — full execution requires server-side compiler]");
+  }
+
+  return {
+    output: logs.length
+      ? logs.join("\n")
+      : "Program ran (no cout output detected)\n// Full C++ execution requires a server-side compiler",
+    error: null
+  };
+}
+
+// ─── Proper Java validator ──────────────────────────────────────────────────────
+function runJava(code, stdin = "") {
+  const errors = [];
+  const logs = [];
+
+  const stripped = code
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const lines = stripped.split("\n");
+
+  // Brace balance
+  let braceOpen = 0, braceClose = 0;
+  for (const ch of stripped) {
+    if (ch === "{") braceOpen++;
+    else if (ch === "}") braceClose++;
+  }
+  if (braceOpen !== braceClose) {
+    errors.push(`Brace mismatch: ${braceOpen} '{' vs ${braceClose} '}'`);
+  }
+
+  // Must have a class
+  if (!/class\s+\w+/.test(stripped)) {
+    errors.push("Error: No class definition found");
+  }
+
+  // Must have main method
+  if (!/public\s+static\s+void\s+main\s*\(\s*String/.test(stripped)) {
+    errors.push("Error: No valid main method — expected: public static void main(String[] args)");
+  }
+
+  // Check semicolons on statement lines
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const t = raw.trim();
+    if (!t) continue;
+    if (/^(public|private|protected|class|interface|enum)\b/.test(t) && t.endsWith("{")) continue;
+    if (/^[{}]$/.test(t)) continue;
+    if (t.endsWith("{") || t.endsWith("}")) continue;
+    if (/^\s*(if|else|for|while|do|switch|try|catch|finally|class)\b/.test(raw)) continue;
+    if (/^\s*(public|private|protected)\s+(class|interface|enum)\b/.test(raw)) continue;
+    if (/^\s*(public|private|protected|static|void|int|double|float|boolean|String|long|char)\s+\w+\s*\(/.test(t) && t.endsWith("{")) continue;
+    if (/^\s*@\w+/.test(t)) continue; // annotations
+
+    const looksLikeStatement = /[=+\-*/%!<>&|^~]|<<|>>|\w+\s*\(/.test(t);
+    if (looksLikeStatement && !t.endsWith(";") && !t.endsWith(",") && !t.endsWith("{") && !t.endsWith("}")) {
+      errors.push(`Line ${i + 1}: Possibly missing semicolon → ${t.substring(0, 50)}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    return { output: "", error: "Compilation Error:\n" + errors.join("\n") };
+  }
+
+  // Simulate System.out.println
+  const re = /System\.out\.println\s*\(\s*"([^"]*)"\s*\)/g;
+  let match;
+  while ((match = re.exec(stripped)) !== null) {
+    logs.push(match[1]);
+  }
+  // System.out.print
+  const re2 = /System\.out\.print\s*\(\s*"([^"]*)"\s*\)/g;
+  while ((match = re2.exec(stripped)) !== null) {
+    logs.push(match[1]);
+  }
+
+  if (stdin) {
+    logs.push("\n[stdin provided — full execution requires server-side compiler]");
+  }
+
+  return {
+    output: logs.length
+      ? logs.join("\n")
+      : "Program ran (no System.out output detected)\n// Full Java execution requires a server-side compiler",
+    error: null
+  };
+}
+
 const LANGUAGES = {
-  javascript: { name: "JavaScript", icon: "JS", template: `// JavaScript\nconsole.log("Hello, CodeSync!");\n\nconst add = (a, b) => a + b;\nconsole.log("2 + 3 =", add(2, 3));`, run: runJS },
+  javascript: { name: "JavaScript", icon: "JS", template: `// JavaScript\n// Use input() to read stdin lines\nconst name = input();\nconsole.log("Hello, " + name + "!");\n\nconst a = parseInt(input());\nconst b = parseInt(input());\nconsole.log("Sum:", a + b);`, run: runJS },
   typescript: { name: "TypeScript", icon: "TS", template: `// TypeScript\ninterface User { name: string; age: number; }\nconst greet = (u: User): string => \`Hello, \${u.name}!\`;\nconsole.log(greet({ name: "CodeSync", age: 1 }));`, run: runTS },
-  python:     { name: "Python",     icon: "PY", template: `# Python\nprint("Hello, CodeSync!")\n\ndef add(a, b):\n    return a + b\n\nprint("2 + 3 =", add(2, 3))`, run: runPython },
+  python:     { name: "Python",     icon: "PY", template: `# Python\n# input() reads from stdin\nname = input("Enter your name: ")\nprint("Hello,", name)\n\na = int(input("Enter a: "))\nb = int(input("Enter b: "))\nprint("Sum:", a + b)`, run: runPython },
   html:       { name: "HTML",       icon: "HT", template: `<!DOCTYPE html>\n<html>\n<head>\n  <style>body{font-family:sans-serif;background:#1a1a2e;color:#eee;padding:40px} h1{color:#6c63ff}</style>\n</head>\n<body>\n  <h1>Hello, CodeSync!</h1>\n  <p>Edit me and click Run.</p>\n</body>\n</html>`, run: (c) => ({ output: c, isHTML: true, error: null }) },
   css:        { name: "CSS",        icon: "CS", template: `/* CSS Preview */\nbody {\n  font-family: sans-serif;\n  background: #1a1a2e;\n  color: #eee;\n  padding: 40px;\n}\n\nh1 { color: #6c63ff; }`, run: (c) => ({ output: `<html><head><style>${c}</style></head><body><h1>CSS Preview</h1><p>Your styles are applied here.</p></body></html>`, isHTML: true, error: null }) },
   json:       { name: "JSON",       icon: "{}", template: `{\n  "name": "CodeSync",\n  "version": "2.0.0",\n  "features": ["real-time", "multi-language", "auth"]\n}`, run: (c) => { try { return { output: JSON.stringify(JSON.parse(c), null, 2), error: null }; } catch (e) { return { output: "", error: e.message }; } } },
   sql:        { name: "SQL",        icon: "SQ", template: `-- SQL Demo\nSELECT u.id, u.name, COUNT(p.id) AS posts\nFROM users u\nLEFT JOIN posts p ON p.user_id = u.id\nWHERE u.active = true\nGROUP BY u.id\nORDER BY posts DESC\nLIMIT 10;`, run: () => ({ output: "id | name  | posts\n---|-------|------\n1  | Alice | 12\n2  | Bob   | 8\n3  | Carol | 5\n\n3 rows returned.", error: null }) },
-  java:{ name:"Java", icon:"JV", color:"#b07219",
-    template:`// Java\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, CodeSync!");\n        int sum = 0;\n        for (int i = 1; i <= 5; i++) sum += i;\n        System.out.println("Sum 1-5: " + sum);\n    }\n}`,
-    run(code){
-      const errors=[];
-      const logs=[];
-      // Basic Java syntax error detection
-      const lines = code.split("\n");
-      let braceOpen=0, braceClose=0, parenOpen=0, parenClose=0;
-      for(let i=0;i<lines.length;i++){
-        const l=lines[i];
-        braceOpen  += (l.match(/{/g)||[]).length;
-        braceClose += (l.match(/}/g)||[]).length;
-        parenOpen  += (l.match(/\(/g)||[]).length;
-        parenClose += (l.match(/\)/g)||[]).length;
-        // Missing semicolons on statement lines
-        const trimmed=l.trim();
-        if(trimmed.length>0 && !trimmed.endsWith("{") && !trimmed.endsWith("}") && !trimmed.endsWith(";") && !trimmed.startsWith("//") && !trimmed.startsWith("*") && !trimmed.startsWith("public class") && !trimmed.startsWith("public static") && !trimmed.startsWith("for") && !trimmed.startsWith("if") && !trimmed.startsWith("while") && !trimmed.startsWith("else") && trimmed.includes(" ")){
-          errors.push("Line "+(i+1)+": Missing semicolon ';' → "+trimmed.substring(0,40));
-        }
-      }
-      if(braceOpen!==braceClose) errors.push("Brace mismatch: "+braceOpen+" opening '{' but "+braceClose+" closing '}'");
-      if(parenOpen!==parenClose) errors.push("Parenthesis mismatch: "+parenOpen+" '(' but "+parenClose+" ')'");
-      // Check for common errors
-      if(!code.includes("class ")) errors.push("Error: No class definition found. Java requires a class.");
-      if(!code.includes("main")) errors.push("Error: No main method found. Java requires public static void main(String[] args)");
-      if(errors.length>0) return{output:"",error:"Compilation Error:\n"+errors.join("\n")};
-      // Simulate output
-      const re=/System\.out\.println\(([^)]+)\)/g;
-      let m;
-      while((m=re.exec(code))!==null){
-        let val=m[1].replace(/^"|"$/g,"").replace(/^'|'$/g,"");
-        logs.push(val);
-      }
-      if(!logs.length) logs.push("Program executed successfully (no output)\n// Note: Full Java execution requires a server-side compiler");
-      return{output:logs.join("\n"),error:null};
-    }
-  },
-  cpp:{ name:"C++", icon:"C+", color:"#f34b7d",
-    template:`// C++\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, CodeSync!" << endl;\n    int sum = 0;\n    for (int i = 1; i <= 5; i++) sum += i;\n    cout << "Sum 1-5: " << sum << endl;\n    return 0;\n}`,
-    run(code){
-      const errors=[];
-      const logs=[];
-      // Basic C++ syntax error detection
-      const lines=code.split("\n");
-      let braceOpen=0,braceClose=0,parenOpen=0,parenClose=0;
-      for(let i=0;i<lines.length;i++){
-        const l=lines[i];
-        braceOpen  += (l.match(/{/g)||[]).length;
-        braceClose += (l.match(/}/g)||[]).length;
-        parenOpen  += (l.match(/\(/g)||[]).length;
-        parenClose += (l.match(/\)/g)||[]).length;
-        const trimmed=l.trim();
-        // Detect missing semicolons
-        if(trimmed.length>0 && !trimmed.endsWith("{") && !trimmed.endsWith("}") && !trimmed.endsWith(";") && !trimmed.startsWith("//") && !trimmed.startsWith("#") && !trimmed.startsWith("/*") && !trimmed.startsWith("*") && !trimmed.startsWith("for") && !trimmed.startsWith("if") && !trimmed.startsWith("while") && !trimmed.startsWith("else") && trimmed.includes(" ")){
-          errors.push("Line "+(i+1)+": Missing semicolon ';' → "+trimmed.substring(0,40));
-        }
-      }
-      if(braceOpen!==braceClose) errors.push("Brace mismatch: "+braceOpen+" opening '{' but "+braceClose+" closing '}'");
-      if(parenOpen!==parenClose) errors.push("Parenthesis mismatch: "+parenOpen+" '(' but "+parenClose+" ')'");
-      if(!code.includes("#include")) errors.push("Warning: No #include directive found");
-      if(!code.includes("main")) errors.push("Error: No main() function found");
-      if(errors.length>0) return{output:"",error:"Compile Error:\n"+errors.join("\n")};
-      // Simulate cout output
-      const re=/cout\s*<<\s*"([^"]+)"/g;
-      let m;
-      while((m=re.exec(code))!==null){ logs.push(m[1]); }
-      if(!logs.length) logs.push("Program executed successfully (no output)\n// Note: Full C++ execution requires a server-side compiler");
-      return{output:logs.join("\n"),error:null};
-    }
-  },
+  java:       { name: "Java",       icon: "JV", template: `// Java\npublic class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, CodeSync!");\n        int sum = 0;\n        for (int i = 1; i <= 5; i++) sum += i;\n        System.out.println("Sum 1-5: " + sum);\n    }\n}`, run: runJava },
+  cpp:        { name: "C++",        icon: "C+", template: `// C++\n#include <iostream>\nusing namespace std;\n\nint main() {\n    cout << "Hello, CodeSync!" << endl;\n    int sum = 0;\n    for (int i = 1; i <= 5; i++) sum += i;\n    cout << "Sum 1-5: " << sum << endl;\n    return 0;\n}`, run: runCpp },
   markdown:   { name: "Markdown",   icon: "MD", template: `# Hello CodeSync\n\n## Features\n- Real-time collaboration\n- **Multi-language** support\n- Code execution\n\n> Build together, ship faster.`, run: (c) => ({ output: `<html><head><style>body{font-family:sans-serif;padding:24px;color:#333}h1,h2{color:#2d5be3}code{background:#f0f0f0;padding:2px 6px;border-radius:3px}blockquote{border-left:4px solid #2d5be3;margin:0;padding-left:16px;color:#666}</style></head><body>${c.replace(/^### (.+)/gm,"<h3>$1</h3>").replace(/^## (.+)/gm,"<h2>$1</h2>").replace(/^# (.+)/gm,"<h1>$1</h1>").replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/`([^`]+)`/g,"<code>$1</code>").replace(/^- (.+)/gm,"<li>$1</li>").replace(/> (.+)/gm,"<blockquote>$1</blockquote>").replace(/\n/g,"<br>")}</body></html>`, isHTML: true, error: null }) },
 };
-
-// ─── Code Runners ──────────────────────────────────────────────────────────────
-function runJS(code) {
-  const logs = [];
-  const sc = { log: (...a) => logs.push(a.map(x => typeof x === "object" ? JSON.stringify(x, null, 2) : String(x)).join(" ")), error: (...a) => logs.push("❌ " + a.join(" ")), warn: (...a) => logs.push("⚠️ " + a.join(" ")), info: (...a) => logs.push("ℹ️ " + a.join(" ")) };
-  try { const fn = new Function("console", code); const r = fn(sc); if (r !== undefined) logs.push("→ " + String(r)); return { output: logs.join("\n") || "✓ Done (no output)", error: null }; }
-  catch (e) { return { output: "", error: e.message }; }
-}
-function runTS(code) {
-  const stripped = code.replace(/:\s*[\w|&<>[\]]+(?=[,)\s=;{])/g, "").replace(/interface\s+\w+\s*{[^}]*}/g, "").replace(/<[\w,\s]+>/g, "").replace(/as\s+\w+/g, "");
-  return runJS(stripped);
-}
-function runPython(code) {
-  const logs = [];
-  for (const line of code.split("\n")) {
-    const t = line.trim();
-    if (t.startsWith("print(")) {
-      const inner = t.slice(6, -1).replace(/^["']|["']$/g, "").replace(/f"([^"]*)"/, (_, s) => s.replace(/\{([^}]+)\}/g, "..."));
-      logs.push(inner);
-    }
-  }
-  return { output: logs.join("\n") || "✓ Python (limited browser simulation)", error: null };
-}
 
 // ─── Syntax Highlighter ────────────────────────────────────────────────────────
 const KW_JS = ["const","let","var","function","return","if","else","for","while","class","new","this","import","export","default","from","async","await","try","catch","throw","typeof","true","false","null","undefined","switch","case","break","continue","interface","type","extends","void","static","readonly","enum"];
@@ -146,6 +327,64 @@ function Toaster() {
           {t.type === "error" ? "⚠" : t.type === "info" ? "ℹ" : "✓"} {t.msg}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─── Stdin Input Modal ─────────────────────────────────────────────────────────
+function StdinModal({ lang, onSubmit, onCancel }) {
+  const [value, setValue] = useState("");
+  const taRef = useRef(null);
+
+  useEffect(() => { taRef.current?.focus(); }, []);
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000
+    }}>
+      <div style={{
+        background: "#12121e", border: "1px solid #2a2a4a", borderRadius: 16,
+        padding: 28, width: 480, boxShadow: "0 24px 64px rgba(0,0,0,0.6)"
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div>
+            <h3 style={{ color: "#e0e0ff", fontSize: 16, fontWeight: 700, margin: 0 }}>Program Input (stdin)</h3>
+            <p style={{ color: "#555", fontSize: 12, marginTop: 4 }}>
+              {lang === "javascript" || lang === "typescript"
+                ? "Each line is returned by one call to input()"
+                : lang === "python"
+                ? "Each line is returned by one call to input()"
+                : "Each line is one line of stdin for Scanner / cin"}
+            </p>
+          </div>
+          <button onClick={onCancel} style={{ background: "transparent", border: "none", color: "#555", cursor: "pointer", fontSize: 18, lineHeight: 1 }}>✕</button>
+        </div>
+        <textarea
+          ref={taRef}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          placeholder={"Enter each input on a new line...\ne.g.\nAlice\n10\n20"}
+          style={{
+            width: "100%", height: 150, background: "#1a1a2e", border: "1.5px solid #2a2a4a",
+            color: "#e0e0ff", padding: "12px 14px", borderRadius: 10, fontSize: 13,
+            fontFamily: "'Fira Code', monospace", resize: "vertical", outline: "none",
+            lineHeight: 1.6
+          }}
+          onFocus={e => { e.target.style.borderColor = "#6c63ff"; }}
+          onBlur={e => { e.target.style.borderColor = "#2a2a4a"; }}
+          onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); onSubmit(value); } }}
+        />
+        <p style={{ color: "#333", fontSize: 11, margin: "8px 0 16px" }}>Ctrl+Enter to run</p>
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button onClick={onCancel} style={{ background: "transparent", border: "1px solid #2a2a4a", color: "#666", padding: "8px 18px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: "inherit" }}>
+            Cancel
+          </button>
+          <button onClick={() => onSubmit(value)} style={{ background: "linear-gradient(135deg,#6c63ff,#2d5be3)", color: "#fff", border: "none", padding: "8px 22px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit" }}>
+            ▶ Run
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -255,7 +494,6 @@ function Lobby({ user, onJoin, onLogout }) {
             <h2 style={{ color: "#fff", fontSize: 36, fontWeight: 700, letterSpacing: -1 }}>Start Coding Together</h2>
             <p style={{ color: "#555", marginTop: 8 }}>Create a room or join with a code</p>
           </div>
-          {/* Join */}
           <div className="lc" style={{ marginBottom: 16, cursor: "default" }}>
             <p style={{ color: "#666", fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 12 }}>Join a Room</p>
             <div style={{ display: "flex", gap: 12 }}>
@@ -267,7 +505,6 @@ function Lobby({ user, onJoin, onLogout }) {
           <button className="pb" style={{ width: "100%", padding: 15, fontSize: 15 }} onClick={createRoom} disabled={loading}>
             {loading ? "Creating..." : "+ Create New Room"}
           </button>
-          {/* My rooms */}
           {rooms.length > 0 && (
             <div style={{ marginTop: 32 }}>
               <p style={{ color: "#444", fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 12 }}>My Rooms</p>
@@ -304,14 +541,15 @@ function EditorPage({ user, roomId, onLeave }) {
   const [collaborators, setCollaborators] = useState([{ ...user, socketId: "me" }]);
   const [connected, setConnected] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Stdin modal state
+  const [showStdin, setShowStdin] = useState(false);
 
   const socketRef = useRef(null);
   const textareaRef = useRef(null);
   const saveTimer = useRef(null);
-  const codeRef = useRef(code); // keep live ref for socket callbacks
+  const codeRef = useRef(code);
   const T = THEMES[theme];
 
-  // ── Connect socket + load room ──────────────────────────────────────────────
   useEffect(() => {
     const token = localStorage.getItem("codesync_token");
     const socket = initSocket(token);
@@ -324,14 +562,12 @@ function EditorPage({ user, roomId, onLeave }) {
     socket.on("disconnect", () => setConnected(false));
     socket.on("connect_error", () => { setConnected(false); toast("Connection lost — retrying...", "error"); });
 
-    // Joined: receive current code + users
     socket.on(EVENTS.JOINED, ({ users, code: serverCode, lang: serverLang }) => {
       if (serverCode) { setCode(serverCode); codeRef.current = serverCode; }
       if (serverLang) setLang(serverLang);
       setCollaborators(users);
     });
 
-    // Another user's code change
     socket.on(EVENTS.CODE_CHANGE, ({ lang: changedLang, code: newCode }) => {
       if (changedLang === lang || !changedLang) {
         setCode(newCode);
@@ -339,32 +575,24 @@ function EditorPage({ user, roomId, onLeave }) {
       }
     });
 
-    // Another user changed language
     socket.on(EVENTS.LANG_CHANGE, ({ lang: newLang, code: newCode }) => {
       setLang(newLang);
       if (newCode) { setCode(newCode); codeRef.current = newCode; }
     });
 
-    // User list updates
     socket.on(EVENTS.ROOM_USERS, ({ users }) => setCollaborators(users));
     socket.on(EVENTS.USER_LEFT, ({ username, users }) => { toast(`${username} left`, "info"); setCollaborators(users); });
-
     socket.on(EVENTS.ERROR, ({ message }) => toast(message, "error"));
 
     return () => { disconnectSocket(); };
   }, [roomId]);
 
-  // ── Code change handler ─────────────────────────────────────────────────────
   const handleCodeChange = (e) => {
     const val = e.target.value;
     setCode(val);
     codeRef.current = val;
     setSaved(false);
-
-    // Broadcast to collaborators
     socketRef.current?.emit(EVENTS.CODE_CHANGE, { roomId, lang, code: val });
-
-    // Auto-save to DB after 1s idle
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => saveCode(lang, val), 1000);
   };
@@ -380,27 +608,29 @@ function EditorPage({ user, roomId, onLeave }) {
   };
 
   const changeLang = (newLang) => {
-  saveCode(lang, codeRef.current);
+    saveCode(lang, codeRef.current);
+    setLang(newLang);
+    const template = LANGUAGES[newLang].template;
+    setCode(template);
+    codeRef.current = template;
+    setOutput(null);
+    socketRef.current?.emit(EVENTS.LANG_CHANGE, { roomId, lang: newLang });
+  };
 
-  setLang(newLang);
+  // Called when Run is clicked — show stdin modal for supported langs, else run directly
+  const handleRunClick = () => {
+    if (STDIN_LANGS.includes(lang)) {
+      setShowStdin(true);
+    } else {
+      executeCode("");
+    }
+  };
 
-  const template = LANGUAGES[newLang].template;
-
-  setCode(template);
-  codeRef.current = template;
-
-  setOutput(null);
-
-  socketRef.current?.emit(EVENTS.LANG_CHANGE, {
-    roomId,
-    lang: newLang,
-  });
-};
-
-  const runCode = () => {
+  const executeCode = (stdin) => {
+    setShowStdin(false);
     setRunning(true);
     setTimeout(() => {
-      const result = LANGUAGES[lang].run(codeRef.current);
+      const result = LANGUAGES[lang].run(codeRef.current, stdin);
       setOutput(result);
       setOutputTab(result.isHTML ? "preview" : "console");
       setRunning(false);
@@ -417,7 +647,7 @@ function EditorPage({ user, roomId, onLeave }) {
       setTimeout(() => { ta.selectionStart = ta.selectionEnd = s + 2; }, 0);
     }
     if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); saveCode(lang, codeRef.current); toast("Saved!"); }
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runCode(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); handleRunClick(); }
   };
 
   const copyRoom = () => {
@@ -433,25 +663,30 @@ function EditorPage({ user, roomId, onLeave }) {
     <div style={{ height: "100vh", background: "#0d0d14", display: "flex", flexDirection: "column", fontFamily: "'Space Grotesk',sans-serif", overflow: "hidden" }}>
       <style>{`*{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#333;border-radius:3px}.lb{background:transparent;border:none;color:#666;padding:6px 10px;cursor:pointer;font-size:11px;font-weight:700;font-family:'Fira Code',monospace;border-radius:6px;transition:all 0.15s;white-space:nowrap}.lb:hover{color:#aaa;background:rgba(255,255,255,0.05)}.lb.active{color:#6c63ff;background:rgba(108,99,255,0.12)}.ib{background:transparent;border:none;color:#555;padding:7px 10px;cursor:pointer;border-radius:6px;transition:all 0.15s;font-size:13px;font-family:inherit;font-weight:600}.ib:hover{color:#aaa;background:rgba(255,255,255,0.07)}.rb{background:linear-gradient(135deg,#6c63ff,#2d5be3);color:#fff;border:none;padding:7px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;transition:all 0.2s}.rb:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 20px rgba(108,99,255,0.4)}.rb:disabled{opacity:0.6;cursor:not-allowed}.ot{background:transparent;border:none;color:#555;padding:8px 14px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit;border-bottom:2px solid transparent;transition:all 0.15s}.ot.active{color:#6c63ff;border-bottom-color:#6c63ff}@keyframes slideIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin 1s linear infinite;display:inline-block}`}</style>
 
+      {/* Stdin modal */}
+      {showStdin && (
+        <StdinModal
+          lang={lang}
+          onSubmit={executeCode}
+          onCancel={() => setShowStdin(false)}
+        />
+      )}
+
       {/* ── Header ── */}
       <header style={{ background: "#0d0d14", borderBottom: "1px solid #1a1a2a", padding: "0 16px", height: 50, display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
         <span style={{ fontSize: 18 }}>⚡</span>
         <span style={{ color: "#fff", fontSize: 15, fontWeight: 700 }}>CodeSync</span>
-        {/* Room ID */}
         <button onClick={copyRoom} style={{ background: "rgba(108,99,255,0.1)", border: "1px solid rgba(108,99,255,0.25)", color: "#6c63ff", padding: "4px 12px", borderRadius: 6, fontSize: 12, fontFamily: "'Fira Code',monospace", cursor: "pointer", fontWeight: 700, letterSpacing: 1 }}>
           {copied ? "✓ Copied!" : `# ${roomId}`}
         </button>
-        {/* Connection status */}
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
           <div style={{ width: 7, height: 7, borderRadius: "50%", background: connected ? "#2ecc71" : "#ff4757", transition: "background 0.3s" }} />
           <span style={{ color: "#444", fontSize: 11 }}>{connected ? "Live" : "Connecting..."}</span>
         </div>
-        {/* Save status */}
         <span style={{ color: saving ? "#ffd93d" : saved ? "#2ecc71" : "#333", fontSize: 11, fontWeight: 600, transition: "color 0.3s" }}>
           {saving ? "⟳ Saving..." : saved ? "✓ Saved" : "●"}
         </span>
         <div style={{ flex: 1 }} />
-        {/* Collaborators */}
         <div style={{ display: "flex", alignItems: "center" }}>
           {collaborators.slice(0, 5).map((c, i) => (
             <div key={c.socketId || i} title={c.username} style={{ width: 28, height: 28, borderRadius: "50%", background: c.color || "#6c63ff", border: "2px solid #0d0d14", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#fff", marginLeft: i > 0 ? -8 : 0, zIndex: collaborators.length - i }}>
@@ -486,13 +721,11 @@ function EditorPage({ user, roomId, onLeave }) {
         <div style={{ flex: "0 0 55%", display: "flex", flexDirection: "column", borderRight: "1px solid #1a1a2a", overflow: "hidden" }}>
           <div style={{ flex: 1, position: "relative", background: T.bg, overflow: "auto" }}>
             <div style={{ display: "flex", minHeight: "100%" }}>
-              {/* Line numbers */}
               <div style={{ flexShrink: 0, background: T.bg, padding: "14px 0", userSelect: "none", borderRight: `1px solid ${T.border}`, position: "sticky", left: 0 }}>
                 {lineNums.map(n => (
                   <div key={n} style={{ color: T.comment, fontSize: fontSize - 1, lineHeight: 1.6, textAlign: "right", padding: "0 12px", fontFamily: "'Fira Code',monospace", opacity: 0.5 }}>{n}</div>
                 ))}
               </div>
-              {/* Highlight + Textarea */}
               <div style={{ flex: 1, position: "relative", minWidth: 0 }}>
                 <pre style={{ position: "absolute", inset: 0, padding: "14px 16px", margin: 0, fontSize: fontSize, lineHeight: 1.6, fontFamily: "'Fira Code',monospace", color: T.text, background: "transparent", whiteSpace: wordWrap ? "pre-wrap" : "pre", pointerEvents: "none", overflow: "hidden" }} dangerouslySetInnerHTML={{ __html: highlighted + "\n" }} />
                 <textarea
@@ -513,8 +746,8 @@ function EditorPage({ user, roomId, onLeave }) {
             <label style={{ color: "#555", fontSize: 11, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
               <input type="checkbox" checked={wordWrap} onChange={e => setWordWrap(e.target.checked)} /> Wrap
             </label>
-            <button className="rb" onClick={runCode} disabled={running}>
-              {running ? <span className="spin">⟳</span> : "▶"} {running ? "Running..." : "Run"}
+            <button className="rb" onClick={handleRunClick} disabled={running} title={STDIN_LANGS.includes(lang) ? "Run (will prompt for input)" : "Run"}>
+              {running ? <span className="spin">⟳</span> : "▶"} {running ? "Running..." : STDIN_LANGS.includes(lang) ? "Run ↵" : "Run"}
             </button>
           </div>
         </div>
@@ -532,7 +765,9 @@ function EditorPage({ user, roomId, onLeave }) {
               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "#2a2a3a", gap: 12, textAlign: "center" }}>
                 <span style={{ fontSize: 36 }}>▶</span>
                 <p style={{ fontSize: 13 }}>Run code to see output</p>
-                <p style={{ fontSize: 11, color: "#1a1a2a" }}>Ctrl+Enter to run · Ctrl+S to save</p>
+                <p style={{ fontSize: 11, color: "#1a1a2a" }}>
+                  {STDIN_LANGS.includes(lang) ? "Click Run ↵ to provide input before executing" : "Ctrl+Enter to run · Ctrl+S to save"}
+                </p>
               </div>
             )}
             {output && outputTab === "console" && (
@@ -570,7 +805,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Restore session from token
     const token = localStorage.getItem("codesync_token");
     if (token) {
       api.me().then(({ user }) => { setUser(user); setLoading(false); }).catch(() => { localStorage.removeItem("codesync_token"); setLoading(false); });
